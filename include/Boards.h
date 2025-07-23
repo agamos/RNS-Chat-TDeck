@@ -232,7 +232,7 @@
 
       // const int DISPLAY_DC = 12;
       const int DISPLAY_CS = 12;
-      const int DISPLAY_MISO = 38 // not connected
+      const int DISPLAY_MISO = 38; // not connected
       // const int DISPLAY_MOSI = 9;
       const int DISPLAY_CLK = 40;
       const int DISPLAY_BL_PIN = 42;

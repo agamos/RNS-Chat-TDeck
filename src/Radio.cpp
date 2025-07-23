@@ -5,7 +5,7 @@
 // Obviously still under the MIT license.
 
 #include "Radio.hpp"
-#include "src/misc/ModemISR.h"
+#include "misc/ModemISR.h"
 
 #if PLATFORM == PLATFORM_ESP32 
   #if defined(ESP32) and !defined(CONFIG_IDF_TARGET_ESP32S3)

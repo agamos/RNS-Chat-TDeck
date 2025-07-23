@@ -35,7 +35,7 @@
 
 #include "ROM.h"
 #include "Framing.h"
-#include "src/misc/MD5.h"
+#include "misc/MD5.h"
 
 #if !HAS_EEPROM && MCU_VARIANT == MCU_NRF52
 uint8_t eeprom_read(uint32_t mapped_addr);
