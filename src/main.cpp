@@ -3,7 +3,9 @@
 #include <Wire.h>
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7789.h>
-#include <RadioLib.h>
+#include "Radio.hpp"
+#include "Framing.h"
+#include "Utilities.h"
 
 // T-Deck pins
 #define BOARD_POWERON 10
@@ -22,32 +24,15 @@
 #define LILYGO_KB_ALT_B_BRIGHTNESS_CMD 0x02
 
 // Display setup
-Adafruit_ST7789 display(TFT_CS, TFT_DC, TFT_MOSI, TFT_SCK, -1); // No reset pin
+Adafruit_ST7789 display = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_MOSI, TFT_SCK, -1); // No reset pin
 
 // LoRa setup
-SX1278 LoRa = SX1278(new Module(LORA_SS, LORA_DIO0, LORA_RST));
+RadioInterface LoRa(LORA_SS);
 
-// Message structure (inspired by RNode_Firmware_CE)
-struct Message {
-  uint8_t senderHash[16];
-  uint8_t content[100];
-  uint16_t contentLength;
-};
-
-// Keyboard buffer
+// Message buffer
 char keyboardBuffer[100];
 uint16_t keyboardIndex = 0;
 bool keyboardEnterPressed = false;
-
-// Fallback hex conversion (replace with Utilities.h if available)
-void bytes_to_hex(const uint8_t* bytes, size_t len, char* output) {
-  const char hex[] = "0123456789abcdef";
-  for (size_t i = 0; i < len; i++) {
-    output[i * 2] = hex[(bytes[i] >> 4) & 0xF];
-    output[i * 2 + 1] = hex[bytes[i] & 0xF];
-  }
-  output[len * 2] = '\0';
-}
 
 // Keyboard functions (from Keyboard_T_Deck_Master.ino)
 void setKeyboardBrightness(uint8_t value) {
@@ -87,7 +72,6 @@ void displayMessage(const char* message, const char* sender) {
   display.print("From: ");
   display.println(sender);
   display.println(message);
-  display.display();
 }
 
 void displayStatus(const char* status) {
@@ -96,7 +80,6 @@ void displayStatus(const char* status) {
   display.setTextColor(ST77XX_YELLOW);
   display.setTextSize(1);
   display.println(status);
-  display.display();
 }
 
 // Simple XOR encryption (replace with Sodium for production)
@@ -108,8 +91,7 @@ void encryptMessage(uint8_t* data, uint16_t len, const uint8_t* key) {
 
 // LoRa setup
 void setupLoRa() {
-  int state = LoRa.begin(915.0, 125.0, 7, 5); // 915 MHz, 125 kHz BW, SF7, CR4/5
-  if (state != RADIOLIB_ERR_NONE) {
+  if (!LoRa.begin()) {
     displayStatus("LoRa init failed");
     while (1);
   }
@@ -131,8 +113,7 @@ void setup() {
   display.setTextColor(ST77XX_GREEN);
   display.setTextSize(1);
   display.println("T-Deck RNode Messenger");
-  display.display();
-
+  
   // Initialize keyboard
   Wire.begin(BOARD_I2C_SDA, BOARD_I2C_SCL);
   Wire.requestFrom(LILYGO_KB_SLAVE_ADDRESS, 1);
@@ -150,23 +131,26 @@ void setup() {
 void loop() {
   // Check for incoming messages
   uint8_t buffer[256];
-  int state = LoRa.receive(buffer, sizeof(buffer));
-  if (state == RADIOLIB_ERR_NONE) {
-    Message msg;
-    memcpy(msg.senderHash, buffer, 16);
-    msg.contentLength = min((size_t)(buffer[16] | (buffer[17] << 8)), sizeof(msg.content));
-    memcpy(msg.content, buffer + 18, msg.contentLength);
-    
-    // Decrypt
-    uint8_t key[16] = {0x1a, 0x2b, 0x3c, 0x4d, 0x5e, 0x6f, 0x7a, 0x8b,
-                       0x9c, 0xad, 0xbe, 0xcf, 0xd0, 0xe1, 0xf2, 0x03};
-    encryptMessage(msg.content, msg.contentLength, key);
-    
-    char senderStr[33];
-    bytes_to_hex(msg.senderHash, 16, senderStr);
-    msg.content[msg.contentLength] = '\0';
-    displayMessage((const char*)msg.content, senderStr);
-    delay(2000);
+  int16_t state = LoRa.receive(buffer, sizeof(buffer));
+  if (state > 0) {
+    Frame frame;
+    frame.type = buffer[0];
+    if (frame.type == FRAME_TYPE_DATA) {
+      memcpy(frame.senderHash, buffer + 1, 16);
+      frame.contentLength = min((size_t)(buffer[17] | (buffer[18] << 8)), sizeof(frame.content));
+      memcpy(frame.content, buffer + 19, frame.contentLength);
+      
+      // Decrypt
+      uint8_t key[16] = {0x1a, 0x2b, 0x3c, 0x4d, 0x5e, 0x6f, 0x7a, 0x8b,
+                         0x9c, 0xad, 0xbe, 0xcf, 0xd0, 0xe1, 0xf2, 0x03};
+      encryptMessage(frame.content, frame.contentLength, key);
+      
+      char senderStr[33];
+      bytes_to_hex(frame.senderHash, 16, senderStr);
+      frame.content[frame.contentLength] = '\0';
+      displayMessage((const char*)frame.content, senderStr);
+      delay(2000);
+    }
   }
 
   // Check for keyboard input
@@ -180,27 +164,27 @@ void loop() {
 
   if (keyboardEnterPressed && keyboardIndex > 0) {
     // Prepare message
-    Message msg;
+    Frame frame;
+    frame.type = FRAME_TYPE_DATA;
     uint8_t senderHash[16] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
                              0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10};
-    memcpy(msg.senderHash, senderHash, 16);
-    msg.contentLength = keyboardIndex;
-    memcpy(msg.content, keyboardBuffer, msg.contentLength);
+    memcpy(frame.senderHash, senderHash, 16);
+    frame.contentLength = keyboardIndex;
+    memcpy(frame.content, keyboardBuffer, frame.contentLength);
     
     // Encrypt
     uint8_t key[16] = {0x1a, 0x2b, 0x3c, 0x4d, 0x5e, 0x6f, 0x7a, 0x8b,
                        0x9c, 0xad, 0xbe, 0xcf, 0xd0, 0xe1, 0xf2, 0x03};
-    encryptMessage(msg.content, msg.contentLength, key);
+    encryptMessage(frame.content, frame.contentLength, key);
     
     // Send via LoRa
     uint8_t packet[256];
-    memcpy(packet, msg.senderHash, 16);
-    packet[16] = msg.contentLength & 0xFF;
-    packet[17] = (msg.contentLength >> 8) & 0xFF;
-    memcpy(packet + 18, msg.content, msg.contentLength);
-    state = LoRa.transmit(packet, 18 + msg.contentLength);
-    
-    if (state == RADIOLIB_ERR_NONE) {
+    packet[0] = frame.type;
+    memcpy(packet + 1, frame.senderHash, 16);
+    packet[17] = frame.contentLength & 0xFF;
+    packet[18] = (frame.contentLength >> 8) & 0xFF;
+    memcpy(packet + 19, frame.content, frame.contentLength);
+    if (LoRa.transmit(packet, 19 + frame.contentLength)) {
       displayStatus("Sent message");
     } else {
       displayStatus("Send failed");
