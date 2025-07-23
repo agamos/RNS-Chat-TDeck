@@ -31,7 +31,8 @@
 #ifndef ST7789Spi_h
 #define ST7789Spi_h
 
-#include "OLEDDisplay.h"
+// #include "OLEDDisplay.h"
+#include <Adafruit_ST7789.h>
 #include <SPI.h>
 
 
