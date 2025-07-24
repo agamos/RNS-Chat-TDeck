@@ -23,6 +23,19 @@
 #define RADIO_CS 13 // LoRa CS
 #define SD_CS 12    // MicroSD CS
 
+// EEPROM settings
+#define EEPROM_SIZE 512
+#define EEPROM_PRODUCT 0xB0 // LilyGO LoRa32
+#define EEPROM_MODEL 0xB8   // v2.0, 850–950 MHz
+#define EEPROM_HWREV 1
+#define EEPROM_SERIAL 0x00000002
+#define EEPROM_FREQ_MIN 850000000
+#define EEPROM_FREQ_MAX 950000000
+#define EEPROM_MAX_TX 22
+#define EEPROM_MODE 0x00    // Normal mode
+#define EEPROM_SIGNATURE 0xDEADBEEF // Dummy signature
+
+
 // Public Globals
 uint32_t MAX_SPIFFS = 0;
 uint32_t MAX_APP = 0;
@@ -439,6 +452,29 @@ void validate_status() {
   }
 }
 
+void provision_eeprom() {
+    EEPROM.begin(EEPROM_SIZE);
+    
+    EEPROM.write(0, EEPROM_PRODUCT);
+    EEPROM.write(1, EEPROM_MODEL);
+    EEPROM.write(2, EEPROM_HWREV);
+    EEPROM.writeLong(3, EEPROM_SERIAL);
+    EEPROM.writeLong(7, EEPROM_FREQ_MIN);
+    EEPROM.writeLong(11, EEPROM_FREQ_MAX);
+    EEPROM.write(15, EEPROM_MAX_TX);
+    EEPROM.write(16, EEPROM_MODE);
+    EEPROM.writeLong(17, EEPROM_SIGNATURE);
+    
+    uint8_t checksum = 0;
+    for (int i = 0; i < 21; i++) {
+        checksum += EEPROM.read(i);
+    }
+    EEPROM.write(21, checksum);
+    
+    EEPROM.commit();
+    Serial.println("EEPROM provisioned");
+    tft->println("EEPROM provisioned");
+}
 
 void prepareEEPROM() {
     EEPROM.begin(EEPROMSIZE + 32); // open eeprom.... 32 is the size of the SSID string stored at the end of
@@ -567,9 +603,18 @@ void setup()
     resetTftDisplay();    
     testDisplay();
 
-    prepareRadio();
-      // Validate board health, EEPROM and config
-    validate_status();
+    int prepCount= 1;
+    while(!hw_ready && prepCount < 2) {
+        Serial.println("Radio not ready, retrying...");
+        tft->println("Radio not ready, retrying...");
+        delay(1000);
+        prepareRadio();
+        validate_status();
+        prepCount++;
+        Serial.println("Radio unprovisioned, provisioning EEPROM...");
+        tft->println("Provisioning...");
+        provision_eeprom();
+    }
 
 }
 
