@@ -34,7 +34,8 @@
 #define EEPROM_MAX_TX 22
 #define EEPROM_MODE 0x00    // Normal mode
 #define EEPROM_SIGNATURE 0xDEADBEEF // Dummy signature
-
+#define EEPROM_HASH_OFFSET 22
+#define FIRMWARE_HASH_LENGTH 32
 
 // Public Globals
 uint32_t MAX_SPIFFS = 0;
@@ -476,6 +477,46 @@ void provision_eeprom() {
     tft->println("EEPROM provisioned");
 }
 
+#define EEPROM_HASH_OFFSET 22
+#define FIRMWARE_HASH_LENGTH 32
+
+void set_firmware_hash() {
+    uint8_t default_hash[FIRMWARE_HASH_LENGTH] = {
+        0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
+        0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
+        0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
+        0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20
+    }; // Dummy hash for testing
+
+    bool hash_missing = false;
+    for (int i = 0; i < FIRMWARE_HASH_LENGTH; i++) {
+        if (EEPROM.read(EEPROM_HASH_OFFSET + i) == 0xFF) { // Uninitialized EEPROM
+            hash_missing = true;
+            break;
+        }
+    }
+
+    if (hash_missing) {
+        Serial.println("Firmware hash missing, writing default hash...");
+        tft->println("Writing hash...");
+        EEPROM.begin(EEPROM_SIZE);
+        for (int i = 0; i < FIRMWARE_HASH_LENGTH; i++) {
+            EEPROM.write(EEPROM_HASH_OFFSET + i, default_hash[i]);
+        }
+        uint8_t checksum = 0;
+        for (int i = 0; i < EEPROM_HASH_OFFSET; i++) {
+            checksum += EEPROM.read(i);
+        }
+        EEPROM.write(21, checksum); // Update checksum
+        EEPROM.commit();
+        Serial.println("Firmware hash set");
+        tft->println("Hash set");
+    } else {
+        Serial.println("Firmware hash already set");
+        tft->println("Hash OK");
+    }
+}
+
 void prepareEEPROM() {
     EEPROM.begin(EEPROMSIZE + 32); // open eeprom.... 32 is the size of the SSID string stored at the end of
                                    // the memory, using this trick to not change all the addresses
@@ -615,6 +656,9 @@ void setup()
         tft->println("Provisioning...");
         provision_eeprom();
     }
+    set_firmware_hash();
+    Serial.println("Radio initialised");
+    tft->println("Radio initialised");
 
 }
 
