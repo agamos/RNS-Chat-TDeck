@@ -13,6 +13,9 @@
 // You should have received a copy of the GNU General Public License
 // along with this program.  If not, see <https://www.gnu.org/licenses/>.
 
+#ifndef DEVICE_H
+#define DEVICE_H
+
 #include <Ed25519.h>
 
 #if MCU_VARIANT == MCU_ESP32
@@ -269,3 +272,5 @@ bool device_init() {
   #endif
 }
 #endif
+
+#endif // DEVICE_H

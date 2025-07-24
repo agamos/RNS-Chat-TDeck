@@ -1,0 +1,53 @@
+#ifndef RADIO_H
+#define RADIO_H
+
+#include <Arduino.h>
+#include <SPI.h>
+#include "Interfaces.h"
+#include "Boards.h"
+#include "Config.h"
+#include "misc/FIFOBuffer.h"
+
+#define PHY_HEADER_LORA_SYMBOLS 8
+
+class RadioInterface {
+private:
+  uint8_t _cs;
+  uint8_t _packet[256];
+  bool _ldro;
+  bool _limit_rate;
+  bool _interference_detected;
+  bool _avoid_interference;
+  uint16_t _difs_ms;
+  uint32_t _difs_wait_start;
+  uint32_t _cw_wait_start;
+  uint32_t _cw_wait_target;
+  uint32_t _cw_wait_passed;
+  int8_t _csma_cw;
+  uint8_t _cw_band;
+  uint8_t _cw_min;
+  uint8_t _cw_max;
+  bool _noise_floor_sampled;
+  int16_t _noise_floor_sample;
+  int16_t _noise_floor_buffer[8];
+  int16_t _noise_floor;
+  uint8_t _led_id_filter;
+  uint32_t _preamble_detected_at;
+
+public:
+  RadioInterface(uint8_t cs);
+  bool begin();
+  bool transmit(uint8_t* data, size_t len);
+  int16_t receive(uint8_t* data, size_t len);
+  void setFrequency(float freq);
+  void setBandwidth(float bw);
+  void setSpreadingFactor(uint8_t sf);
+  void setCodingRate(uint8_t cr);
+  void setPreambleLength(uint16_t len);
+  void setSyncWord(uint8_t sw);
+  void setOutputPower(int8_t power);
+  uint8_t readRegister(uint8_t addr);
+  void writeRegister(uint8_t addr, uint8_t value);
+};
+
+#endif

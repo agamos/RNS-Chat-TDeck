@@ -95,10 +95,37 @@ bool stopOta;
 #include "mykeyboard.h"
 #include "sd_functions.h"
 #include "settings.h"
+#include "Utilities.h"
+// #include "lora.hpp"
+
+#ifndef INTERFACE_SPI
+// INTERFACE_SPI is only required on NRF52 platforms, as the SPI pins are set in the class constructor and not by a setter method.
+// Even if custom SPI interfaces are not needed, the array must exist to prevent compilation errors.
+#define INTERFACE_SPI
+SPIClass interface_spi[1];
+#endif
 
 
-// Display setup
-// TFT_eSPI display = TFT_eSPI();
+FIFOBuffer serialFIFO;
+uint8_t serialBuffer[CONFIG_UART_BUFFER_SIZE+1];
+
+uint16_t packet_starts_buf[(CONFIG_QUEUE_MAX_LENGTH)+1];
+
+uint16_t packet_lengths_buf[(CONFIG_QUEUE_MAX_LENGTH)+1];
+
+FIFOBuffer16 packet_starts[INTERFACE_COUNT];
+FIFOBuffer16 packet_lengths[INTERFACE_COUNT];
+
+volatile uint8_t queue_height[INTERFACE_COUNT] = {0};
+volatile uint16_t queued_bytes[INTERFACE_COUNT] = {0};
+
+volatile uint16_t queue_cursor[INTERFACE_COUNT] = {0};
+volatile uint16_t current_packet_start[INTERFACE_COUNT] = {0};
+volatile bool serial_buffering = false;
+
+extern void setup_interfaces(); // from /src/misc/ModemISR.h
+
+
 
 /*********************************************************************
 **  Function: _setup_gpio()
@@ -113,6 +140,305 @@ void _setup_gpio() {}
 *********************************************************************/
 void _post_setup_gpio() __attribute__((weak));
 void _post_setup_gpio() {}
+
+#define MODEM_QUEUE_SIZE 4*INTERFACE_COUNT
+typedef struct {
+      size_t len;
+      int rssi;
+      int snr_raw;
+      uint8_t interface;
+      uint8_t data[];
+} modem_packet_t;
+static xQueueHandle modem_packet_queue = NULL;
+
+char sbuf[128];
+
+uint8_t *packet_queue[INTERFACE_COUNT];
+
+void prepareRadio() {
+    int seed_val = (int)esp_random();
+    randomSeed(seed_val);
+
+    // Initialise serial communication
+    Serial.setRxBufferSize(CONFIG_UART_BUFFER_SIZE);
+    memset(serialBuffer, 0, sizeof(serialBuffer));
+    fifo_init(&serialFIFO, serialBuffer, CONFIG_UART_BUFFER_SIZE);
+
+    Serial.begin(serial_baudrate);
+
+      for (int i = 0; i < INTERFACE_COUNT; i++) {
+    if (interface_pins[i][9] != -1) {
+        pinMode(interface_pins[i][9], OUTPUT);
+        digitalWrite(interface_pins[i][9], HIGH);
+    }
+  }
+
+  // Initialise buffers
+  memset(pbuf, 0, sizeof(pbuf));
+  memset(cmdbuf, 0, sizeof(cmdbuf));
+  
+  memset(packet_starts_buf, 0, sizeof(packet_starts_buf));
+  memset(packet_lengths_buf, 0, sizeof(packet_starts_buf));
+
+  memset(seq, 0xFF, sizeof(seq));
+  memset(read_len, 0, sizeof(read_len));
+
+  setup_interfaces();
+
+  modem_packet_queue = xQueueCreate(MODEM_QUEUE_SIZE, sizeof(modem_packet_t*));
+
+  for (int i = 0; i < INTERFACE_COUNT; i++) {
+      fifo16_init(&packet_starts[i], packet_starts_buf, CONFIG_QUEUE_MAX_LENGTH);
+      fifo16_init(&packet_lengths[i], packet_lengths_buf, CONFIG_QUEUE_MAX_LENGTH);
+      packet_queue[i] = (uint8_t*)malloc(getQueueSize(i)+1);
+  }
+
+  memset(packet_rdy_interfaces_buf, 0, sizeof(packet_rdy_interfaces_buf));
+
+  fifo_init(&packet_rdy_interfaces, packet_rdy_interfaces_buf, MAX_INTERFACES);
+
+  // Create and configure interface objects
+  for (uint8_t i = 0; i < INTERFACE_COUNT; i++) {
+      switch (interfaces[i]) {
+          case SX1262:
+          {
+              sx126x* obj;
+              // if default spi enabled
+              if (interface_cfg[i][0]) {
+                obj = new sx126x(i, &SPI, interface_cfg[i][1],
+                interface_cfg[i][2], interface_pins[i][0], interface_pins[i][1],
+                interface_pins[i][2], interface_pins[i][3], interface_pins[i][6],
+                interface_pins[i][5], interface_pins[i][4], interface_pins[i][8]);
+              }
+              else {
+            obj = new sx126x(i, &interface_spi[i], interface_cfg[i][1],
+            interface_cfg[i][2], interface_pins[i][0], interface_pins[i][1],
+            interface_pins[i][2], interface_pins[i][3], interface_pins[i][6],
+            interface_pins[i][5], interface_pins[i][4], interface_pins[i][8]);
+              }
+            interface_obj[i] = obj;
+            interface_obj_sorted[i] = obj;
+            break;
+          }
+
+          case SX1276:
+          case SX1278:
+          {
+              sx127x* obj;
+              // if default spi enabled
+              if (interface_cfg[i][0]) {
+            obj = new sx127x(i, &SPI, interface_pins[i][0],
+            interface_pins[i][1], interface_pins[i][2], interface_pins[i][3],
+            interface_pins[i][6], interface_pins[i][5], interface_pins[i][4]);
+              }
+              else {
+            obj = new sx127x(i, &interface_spi[i], interface_pins[i][0],
+            interface_pins[i][1], interface_pins[i][2], interface_pins[i][3],
+            interface_pins[i][6], interface_pins[i][5], interface_pins[i][4]);
+              }
+            interface_obj[i] = obj;
+            interface_obj_sorted[i] = obj;
+            break;
+          }
+
+          case SX1280:
+          {
+              sx128x* obj;
+              // if default spi enabled
+              if (interface_cfg[i][0]) {
+            obj = new sx128x(i, &SPI, interface_cfg[i][1],
+            interface_pins[i][0], interface_pins[i][1], interface_pins[i][2],
+            interface_pins[i][3], interface_pins[i][6], interface_pins[i][5],
+            interface_pins[i][4], interface_pins[i][8], interface_pins[i][7]);
+            }
+            else {
+            obj = new sx128x(i, &interface_spi[i], interface_cfg[i][1],
+            interface_pins[i][0], interface_pins[i][1], interface_pins[i][2],
+            interface_pins[i][3], interface_pins[i][6], interface_pins[i][5],
+            interface_pins[i][4], interface_pins[i][8], interface_pins[i][7]);
+            }
+            interface_obj[i] = obj;
+            interface_obj_sorted[i] = obj;
+            break;
+          }
+          
+          default:
+            break;
+      }
+  }
+
+    // Check installed transceiver chip(s) and probe boot parameters. If any of
+    // the configured modems cannot be initialised, do not boot
+    for (int i = 0; i < INTERFACE_COUNT; i++) {
+        switch (interfaces[i]) {
+            case SX1262:
+            case SX1276:
+            case SX1278:
+            case SX1280:
+                selected_radio = interface_obj[i];
+                break;
+
+            default:
+                modems_installed = false;
+                break;
+        }
+        if (selected_radio->preInit()) {
+          modems_installed = true;
+          #if HAS_INPUT
+            // Skip quick-reset console activation
+          #else
+              uint32_t lfr = selected_radio->getFrequency();
+              if (lfr == 0) {
+                // Normal boot
+              } else if (lfr == M_FRQ_R) {
+                // Quick reboot
+                #if HAS_CONSOLE
+                  if (rtc_get_reset_reason(0) == POWERON_RESET) {
+                    console_active = true;
+                  }
+                #endif
+              } else {
+                // Unknown boot
+              }
+              selected_radio->setFrequency(M_FRQ_S);
+          #endif
+        } else {
+          modems_installed = false;
+        }
+        if (!modems_installed) {
+            break;
+        }
+    }
+
+    for (int i = 0; i < INTERFACE_COUNT; i++) {
+        selected_radio = interface_obj[i];
+        if (interfaces[i] == SX1280) {
+            selected_radio->setAvdInterference(false);
+        }
+        if (selected_radio->getAvdInterference()) {
+          #if HAS_EEPROM
+            uint8_t ia_conf = EEPROM.read(eeprom_addr(ADDR_CONF_DIA));
+            if (ia_conf == 0x00) { selected_radio->setAvdInterference(true); }
+            else                 { selected_radio->setAvdInterference(false); }
+          #elif MCU_VARIANT == MCU_NRF52
+            uint8_t ia_conf = eeprom_read(eeprom_addr(ADDR_CONF_DIA));
+            if (ia_conf == 0x00) { selected_radio->setAvdInterference(true); }
+            else                 { selected_radio->setAvdInterference(false); }
+          #endif
+        }
+    }
+
+
+}
+
+void validate_status() {
+  #if MCU_VARIANT == MCU_ESP32
+      // TODO: Get ESP32 boot flags
+      uint8_t boot_flags = 0x02;
+      uint8_t F_POR = 0x00;
+      uint8_t F_BOR = 0x00;
+      uint8_t F_WDR = 0x01;
+  #elif MCU_VARIANT == MCU_NRF52
+      // TODO: Get NRF52 boot flags
+      uint8_t boot_flags = 0x02;
+      uint8_t F_POR = 0x00;
+      uint8_t F_BOR = 0x00;
+      uint8_t F_WDR = 0x01;
+  #endif
+
+  if (hw_ready || device_init_done) {
+    hw_ready = false;
+    Serial.write("Error, invalid hardware check state\r\n");
+    #if HAS_DISPLAY
+      if (disp_ready) {
+        device_init_done = true;
+        update_display();
+      }
+    #endif
+    led_indicate_boot_error();
+  }
+
+  if (boot_flags & (1<<F_POR)) {
+    boot_vector = START_FROM_POWERON;
+  } else if (boot_flags & (1<<F_BOR)) {
+    boot_vector = START_FROM_BROWNOUT;
+  } else if (boot_flags & (1<<F_WDR)) {
+    boot_vector = START_FROM_BOOTLOADER;
+  } else {
+      Serial.write("Error, indeterminate boot vector\r\n");
+      #if HAS_DISPLAY
+        if (disp_ready) {
+          device_init_done = true;
+          update_display();
+        }
+      #endif
+      led_indicate_boot_error();
+  }
+
+  if (boot_vector == START_FROM_BOOTLOADER || boot_vector == START_FROM_POWERON) {
+    if (eeprom_lock_set()) {
+      if (eeprom_product_valid() && eeprom_model_valid() && eeprom_hwrev_valid()) {
+        if (eeprom_checksum_valid()) {
+          eeprom_ok = true;
+          if (modems_installed) {
+            if (device_init()) {
+              hw_ready = true;
+            } else {
+              hw_ready = false;
+            }
+          } else {
+            hw_ready = false;
+            Serial.write("No radio module found\r\n");
+            #if HAS_DISPLAY
+              if (disp_ready) {
+                device_init_done = true;
+                update_display();
+              }
+            #endif
+          }
+        } else {
+          hw_ready = false;
+          Serial.write("Invalid EEPROM checksum\r\n");
+          #if HAS_DISPLAY
+            if (disp_ready) {
+              device_init_done = true;
+              update_display();
+            }
+          #endif
+        }
+      } else {
+        hw_ready = false;
+        Serial.write("Invalid EEPROM configuration\r\n");
+        #if HAS_DISPLAY
+          if (disp_ready) {
+            device_init_done = true;
+            update_display();
+          }
+        #endif
+      }
+    } else {
+      hw_ready = false;
+      Serial.write("Device unprovisioned, no device configuration found in EEPROM\r\n");
+      #if HAS_DISPLAY
+        if (disp_ready) {
+          device_init_done = true;
+          update_display();
+        }
+      #endif
+    }
+  } else {
+    hw_ready = false;
+    Serial.write("Error, incorrect boot vector\r\n");
+    #if HAS_DISPLAY
+      if (disp_ready) {
+        device_init_done = true;
+        update_display();
+      }
+    #endif
+    led_indicate_boot_error();
+  }
+}
+
 
 void prepareEEPROM() {
     EEPROM.begin(EEPROMSIZE + 32); // open eeprom.... 32 is the size of the SSID string stored at the end of
@@ -185,9 +511,11 @@ void prepareEEPROM() {
 *********************************************************************/
 void setup()
 {
+#if HAS_CONSOLE
     Serial.begin(115200);
     delay(2000); // Stabilize USB CDC
     Serial.println("Starting T-Deck Plus display test...");
+#endif
 
 #if defined(BACKLIGHT)
     pinMode(BACKLIGHT, OUTPUT);
@@ -235,12 +563,19 @@ void setup()
         &xHandle          // Task handle (not used)
     );
 
-    delay(2500);
-    resetTftDisplay();
+    delay(2000);  // Wait for the display to initialize
+    resetTftDisplay();    
     testDisplay();
+
+    prepareRadio();
+      // Validate board health, EEPROM and config
+    validate_status();
+
 }
 
 void loop() {
+#if HAS_CONSOLE
   Serial.println("Loop running...");
   delay(1000);
+#endif
 }

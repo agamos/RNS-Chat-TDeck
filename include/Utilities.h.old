@@ -1,0 +1,26 @@
+#ifndef UTILITIES_H
+#define UTILITIES_H
+
+#include "Radio.hpp"
+#include "Config.h"
+
+// Included for sorting
+#include <algorithm>
+#include <iterator>
+
+#include <stddef.h>
+
+#include "ROM.h"
+#include "Framing.h"
+#include "misc/MD5.h"
+
+void bytes_to_hex(const uint8_t* bytes, size_t len, char* output) {
+  const char hex[] = "0123456789abcdef";
+  for (size_t i = 0; i < len; i++) {
+    output[i * 2] = hex[(bytes[i] >> 4) & 0xF];
+    output[i * 2 + 1] = hex[bytes[i] & 0xF];
+  }
+  output[len * 2] = '\0';
+}
+
+#endif
