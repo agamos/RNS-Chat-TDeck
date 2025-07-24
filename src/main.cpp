@@ -1,197 +1,234 @@
-#include <Arduino.h>
-#include <SPI.h>
-#include <Wire.h>
-#include <Adafruit_GFX.h>
-#include <Adafruit_ST7789.h>
-#include "Radio.hpp"
-#include "Framing.h"
-#include "Utilities.h"
+#include <globals.h>
 
-// T-Deck pins
+#include <EEPROM.h>
+
+#include <tft.h>
+#include <SD.h>
+#include <SPIFFS.h>
+
+#include "powerSave.h"
+#include <functional>
+#include <iostream>
+#include <string>
+#include <vector>
+
+
+// T-Deck Plus pins
 #define BOARD_POWERON 10
-#define BOARD_I2C_SDA 18
-#define BOARD_I2C_SCL 8
-#define LORA_SS 13
-#define LORA_RST 14
-#define LORA_DIO0 15
 #define TFT_CS 34
 #define TFT_DC 35
 #define TFT_SCK 36
 #define TFT_MOSI 33
 #define TFT_MISO 47
-#define LILYGO_KB_SLAVE_ADDRESS 0x55
-#define LILYGO_KB_BRIGHTNESS_CMD 0x01
-#define LILYGO_KB_ALT_B_BRIGHTNESS_CMD 0x02
+#define RADIO_CS 13 // LoRa CS
+#define SD_CS 12    // MicroSD CS
+
+// Public Globals
+uint32_t MAX_SPIFFS = 0;
+uint32_t MAX_APP = 0;
+uint32_t MAX_FAT_vfs = 0;
+uint32_t MAX_FAT_sys = 0;
+uint16_t FGCOLOR = GREEN;
+uint16_t ALCOLOR = RED;
+uint16_t BGCOLOR = BLACK;
+uint16_t odd_color = 0x30c5;
+uint16_t even_color = 0x32e5;
+// Navigation Variables
+long LongPressTmp = 0;
+volatile bool LongPress = false;
+volatile bool NextPress = false;
+volatile bool PrevPress = false;
+volatile bool UpPress = false;
+volatile bool DownPress = false;
+volatile bool SelPress = false;
+volatile bool EscPress = false;
+volatile bool AnyKeyPress = false;
+TouchPoint touchPoint;
+keyStroke KeyStroke;
+
+#if defined(HAS_TOUCH)
+volatile uint16_t tftHeight = TFT_WIDTH - 20;
+#else
+volatile uint16_t tftHeight = TFT_WIDTH;
+#endif
+volatile uint16_t tftWidth = TFT_HEIGHT;
+TaskHandle_t xHandle;
+void __attribute__((weak)) taskInputHandler(void *parameter) {
+    auto timer = millis();
+    while (true) {
+        checkPowerSaveTime();
+        if (!AnyKeyPress || millis() - timer > 75) {
+            resetGlobals();
+#ifndef DONT_USE_INPUT_TASK
+            InputHandler();
+#endif
+            timer = millis();
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+}
+
+// More 2nd grade global Variables
+int dimmerSet = 20;
+unsigned long previousMillis;
+bool isSleeping;
+bool isScreenOff;
+bool dev_mode = false;
+int bright = 100;
+bool dimmer = false;
+int prog_handler; // 0 - Flash, 1 - SPIFFS
+int currentIndex;
+int rotation = ROTATION;
+bool sdcardMounted;
+bool onlyBins;
+bool returnToMenu;
+bool update;
+bool askSpiffs;
+#ifdef DISABLE_OTA
+bool stopOta = true;
+#else
+bool stopOta;
+#endif
+
+#include "display.h"
+#include "massStorage.h"
+#include "mykeyboard.h"
+#include "sd_functions.h"
+#include "settings.h"
+
 
 // Display setup
-Adafruit_ST7789 display = Adafruit_ST7789(TFT_CS, TFT_DC, TFT_MOSI, TFT_SCK, -1); // No reset pin
+// TFT_eSPI display = TFT_eSPI();
 
-// LoRa setup
-RadioInterface LoRa(LORA_SS);
+/*********************************************************************
+**  Function: _setup_gpio()
+**  Sets up a weak (empty) function to be replaced by /ports/* /interface.h
+*********************************************************************/
+void _setup_gpio() __attribute__((weak));
+void _setup_gpio() {}
 
-// Message buffer
-char keyboardBuffer[100];
-uint16_t keyboardIndex = 0;
-bool keyboardEnterPressed = false;
+/*********************************************************************
+**  Function: _post_setup_gpio()
+**  Sets up a weak (empty) function to be replaced by /ports/* /interface.h
+*********************************************************************/
+void _post_setup_gpio() __attribute__((weak));
+void _post_setup_gpio() {}
 
-// Keyboard functions (from Keyboard_T_Deck_Master.ino)
-void setKeyboardBrightness(uint8_t value) {
-  Wire.beginTransmission(LILYGO_KB_SLAVE_ADDRESS);
-  Wire.write(LILYGO_KB_BRIGHTNESS_CMD);
-  Wire.write(value);
-  Wire.endTransmission();
-}
-
-void setKeyboardDefaultBrightness(uint8_t value) {
-  Wire.beginTransmission(LILYGO_KB_SLAVE_ADDRESS);
-  Wire.write(LILYGO_KB_ALT_B_BRIGHTNESS_CMD);
-  Wire.write(value);
-  Wire.endTransmission();
-}
-
-char readKeyboard() {
-  char keyValue = 0;
-  Wire.requestFrom(LILYGO_KB_SLAVE_ADDRESS, 1);
-  while (Wire.available() > 0) {
-    keyValue = Wire.read();
-    if (keyValue != 0x00) {
-      Serial.print("Key: ");
-      Serial.println(keyValue);
-      return keyValue;
-    }
-  }
-  return 0;
-}
-
-// Display functions
-void displayMessage(const char* message, const char* sender) {
-  display.fillScreen(ST77XX_BLACK);
-  display.setCursor(0, 0);
-  display.setTextColor(ST77XX_WHITE);
-  display.setTextSize(1);
-  display.print("From: ");
-  display.println(sender);
-  display.println(message);
-}
-
-void displayStatus(const char* status) {
-  display.fillScreen(ST77XX_BLACK);
-  display.setCursor(0, 0);
-  display.setTextColor(ST77XX_YELLOW);
-  display.setTextSize(1);
-  display.println(status);
-}
-
-// Simple XOR encryption (replace with Sodium for production)
-void encryptMessage(uint8_t* data, uint16_t len, const uint8_t* key) {
-  for (uint16_t i = 0; i < len; i++) {
-    data[i] ^= key[i % 16];
-  }
-}
-
-// LoRa setup
-void setupLoRa() {
-  if (!LoRa.begin()) {
-    displayStatus("LoRa init failed");
-    while (1);
-  }
-}
-
+/*********************************************************************
+**  Function: setup
+**  Where the devices are started and variables set
+*********************************************************************/
 void setup() {
   Serial.begin(115200);
-  
-  // Initialize power
-  pinMode(BOARD_POWERON, OUTPUT);
-  digitalWrite(BOARD_POWERON, HIGH);
-  delay(500);
-  
-  // Initialize display
-  SPI.begin(TFT_SCK, TFT_MISO, TFT_MOSI, TFT_CS);
-  display.init(320, 240);
-  display.fillScreen(ST77XX_BLACK);
-  display.setCursor(0, 0);
-  display.setTextColor(ST77XX_GREEN);
-  display.setTextSize(1);
-  display.println("T-Deck RNode Messenger");
-  
-  // Initialize keyboard
-  Wire.begin(BOARD_I2C_SDA, BOARD_I2C_SCL);
-  Wire.requestFrom(LILYGO_KB_SLAVE_ADDRESS, 1);
-  if (Wire.read() == -1) {
-    displayStatus("Keyboard not online");
-    while (1);
-  }
-  setKeyboardDefaultBrightness(127);
-  setKeyboardBrightness(127);
+  delay(2000); // Stabilize USB CDC
+  Serial.println("Starting T-Deck Plus display test...");
 
-  // Initialize LoRa
-  setupLoRa();
-}
+  #if defined(BACKLIGHT)
+    pinMode(BACKLIGHT, OUTPUT);
+  #endif
+
+     _setup_gpio();
+
+        EEPROM.begin(EEPROMSIZE + 32); // open eeprom.... 32 is the size of the SSID string stored at the end of
+                                   // the memory, using this trick to not change all the addresses
+    if (EEPROM.read(EEPROMSIZE - 13) > 3 || EEPROM.read(EEPROMSIZE - 14) > 240 ||
+        EEPROM.read(EEPROMSIZE - 15) > 100 || EEPROM.read(EEPROMSIZE - 1) > 1 ||
+        EEPROM.read(EEPROMSIZE - 2) > 1 ||
+        (EEPROM.read(EEPROMSIZE - 3) == 0xFF && EEPROM.read(EEPROMSIZE - 4) == 0xFF &&
+         EEPROM.read(EEPROMSIZE - 5) == 0xFF && EEPROM.read(EEPROMSIZE - 6) == 0xFF)) {
+        log_i(
+            "EEPROM back to default\n0=%d\n1=%d\n2=%d\n9=%d\nES-1=%d",
+            EEPROM.read(EEPROMSIZE - 13),
+            EEPROM.read(EEPROMSIZE - 14),
+            EEPROM.read(EEPROMSIZE - 15),
+            EEPROM.read(EEPROMSIZE - 1),
+            EEPROM.read(EEPROMSIZE - 2)
+        );
+        EEPROM.write(EEPROMSIZE - 13, rotation); // Left rotation
+        EEPROM.write(EEPROMSIZE - 14, 20);       // 20s Dimm time
+        EEPROM.write(EEPROMSIZE - 15, 100);      // 100% brightness
+        EEPROM.write(EEPROMSIZE - 1, 1);         // OnlyBins
+        EEPROM.writeString(20, "");
+        EEPROM.writeString(EEPROMSIZE, ""); // resets ssid at the end of the EEPROM
+        EEPROM.write(EEPROMSIZE - 2, 1);    // AskSpiffs
+
+        // FGCOLOR
+        EEPROM.write(EEPROMSIZE - 3, 0x07);
+        EEPROM.write(EEPROMSIZE - 4, 0xE0);
+        // BGCOLOR
+        EEPROM.write(EEPROMSIZE - 5, 0);
+        EEPROM.write(EEPROMSIZE - 6, 0);
+        // ALCOLOR
+        EEPROM.write(EEPROMSIZE - 7, 0xF8);
+        EEPROM.write(EEPROMSIZE - 8, 0x00);
+        // odd
+        EEPROM.write(EEPROMSIZE - 9, 0x30);
+        EEPROM.write(EEPROMSIZE - 10, 0xC5);
+        // even
+        EEPROM.write(EEPROMSIZE - 11, 0x32);
+        EEPROM.write(EEPROMSIZE - 12, 0xe5);
+
+#if defined(HEADLESS)
+        // SD Pins
+        EEPROM.write(90, 0);
+        EEPROM.write(91, 0);
+        EEPROM.write(92, 0);
+        EEPROM.write(93, 0);
+#endif
+        EEPROM.commit(); // Store data to EEPROM
+    }
+
+    rotation = EEPROM.read(EEPROMSIZE - 13);
+    dimmerSet = EEPROM.read(EEPROMSIZE - 14);
+    bright = EEPROM.read(EEPROMSIZE - 15);
+    onlyBins = EEPROM.read(EEPROMSIZE - 1);
+    askSpiffs = EEPROM.read(EEPROMSIZE - 2);
+    FGCOLOR = (EEPROM.read(EEPROMSIZE - 3) << 8) | EEPROM.read(EEPROMSIZE - 4);
+    BGCOLOR = (EEPROM.read(EEPROMSIZE - 5) << 8) | EEPROM.read(EEPROMSIZE - 6);
+    ALCOLOR = (EEPROM.read(EEPROMSIZE - 7) << 8) | EEPROM.read(EEPROMSIZE - 8);
+    odd_color = (EEPROM.read(EEPROMSIZE - 9) << 8) | EEPROM.read(EEPROMSIZE - 10);
+    even_color = (EEPROM.read(EEPROMSIZE - 11) << 8) | EEPROM.read(EEPROMSIZE - 12);
+    // pwd = EEPROM.readString(20);          // read what is on EEPROM here for headless environment
+    // ssid = EEPROM.readString(EEPROMSIZE); // read what is on EEPROM here for headless environment
+    EEPROM.end();
+
+// Init Display
+    tft->begin();
+
+        tft->setRotation(rotation);
+    if (rotation & 0b1) {
+#if defined(HAS_TOUCH)
+        tftHeight = TFT_WIDTH - 20;
+#else
+        tftHeight = TFT_WIDTH;
+#endif
+        tftWidth = TFT_HEIGHT;
+    } else {
+#if defined(HAS_TOUCH)
+        tftHeight = TFT_HEIGHT - 20;
+#else
+        tftHeight = TFT_HEIGHT;
+#endif
+        tftWidth = TFT_WIDTH;
+    }
+    tft->fillScreen(BGCOLOR);
+    setBrightness(bright, false);
+    initDisplay(true);
+
+    _post_setup_gpio();
+
+        // This task keeps running all the time, will never stop
+    xTaskCreate(
+        taskInputHandler, // Task function
+        "InputHandler",   // Task Name
+        3500,             // Stack size
+        NULL,             // Task parameters
+        2,                // Task priority (0 to 3), loopTask has priority 2.
+        &xHandle          // Task handle (not used)
+    );
+  }
 
 void loop() {
-  // Check for incoming messages
-  uint8_t buffer[256];
-  int16_t state = LoRa.receive(buffer, sizeof(buffer));
-  if (state > 0) {
-    Frame frame;
-    frame.type = buffer[0];
-    if (frame.type == FRAME_TYPE_DATA) {
-      memcpy(frame.senderHash, buffer + 1, 16);
-      frame.contentLength = min((size_t)(buffer[17] | (buffer[18] << 8)), sizeof(frame.content));
-      memcpy(frame.content, buffer + 19, frame.contentLength);
-      
-      // Decrypt
-      uint8_t key[16] = {0x1a, 0x2b, 0x3c, 0x4d, 0x5e, 0x6f, 0x7a, 0x8b,
-                         0x9c, 0xad, 0xbe, 0xcf, 0xd0, 0xe1, 0xf2, 0x03};
-      encryptMessage(frame.content, frame.contentLength, key);
-      
-      char senderStr[33];
-      bytes_to_hex(frame.senderHash, 16, senderStr);
-      frame.content[frame.contentLength] = '\0';
-      displayMessage((const char*)frame.content, senderStr);
-      delay(2000);
-    }
-  }
-
-  // Check for keyboard input
-  char c = readKeyboard();
-  if (c == '\n') {
-    keyboardEnterPressed = true;
-    keyboardBuffer[keyboardIndex] = '\0';
-  } else if (c != 0 && keyboardIndex < sizeof(keyboardBuffer) - 1) {
-    keyboardBuffer[keyboardIndex++] = c;
-  }
-
-  if (keyboardEnterPressed && keyboardIndex > 0) {
-    // Prepare message
-    Frame frame;
-    frame.type = FRAME_TYPE_DATA;
-    uint8_t senderHash[16] = {0x01, 0x02, 0x03, 0x04, 0x05, 0x06, 0x07, 0x08,
-                             0x09, 0x0a, 0x0b, 0x0c, 0x0d, 0x0e, 0x0f, 0x10};
-    memcpy(frame.senderHash, senderHash, 16);
-    frame.contentLength = keyboardIndex;
-    memcpy(frame.content, keyboardBuffer, frame.contentLength);
-    
-    // Encrypt
-    uint8_t key[16] = {0x1a, 0x2b, 0x3c, 0x4d, 0x5e, 0x6f, 0x7a, 0x8b,
-                       0x9c, 0xad, 0xbe, 0xcf, 0xd0, 0xe1, 0xf2, 0x03};
-    encryptMessage(frame.content, frame.contentLength, key);
-    
-    // Send via LoRa
-    uint8_t packet[256];
-    packet[0] = frame.type;
-    memcpy(packet + 1, frame.senderHash, 16);
-    packet[17] = frame.contentLength & 0xFF;
-    packet[18] = (frame.contentLength >> 8) & 0xFF;
-    memcpy(packet + 19, frame.content, frame.contentLength);
-    if (LoRa.transmit(packet, 19 + frame.contentLength)) {
-      displayStatus("Sent message");
-    } else {
-      displayStatus("Send failed");
-    }
-    keyboardIndex = 0;
-    keyboardEnterPressed = false;
-  }
-
-  delay(10);
+  Serial.println("Loop running...");
+  delay(1000);
 }
