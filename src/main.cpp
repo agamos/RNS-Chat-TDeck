@@ -114,22 +114,8 @@ void _setup_gpio() {}
 void _post_setup_gpio() __attribute__((weak));
 void _post_setup_gpio() {}
 
-/*********************************************************************
-**  Function: setup
-**  Where the devices are started and variables set
-*********************************************************************/
-void setup() {
-  Serial.begin(115200);
-  delay(2000); // Stabilize USB CDC
-  Serial.println("Starting T-Deck Plus display test...");
-
-  #if defined(BACKLIGHT)
-    pinMode(BACKLIGHT, OUTPUT);
-  #endif
-
-     _setup_gpio();
-
-        EEPROM.begin(EEPROMSIZE + 32); // open eeprom.... 32 is the size of the SSID string stored at the end of
+void prepareEEPROM() {
+    EEPROM.begin(EEPROMSIZE + 32); // open eeprom.... 32 is the size of the SSID string stored at the end of
                                    // the memory, using this trick to not change all the addresses
     if (EEPROM.read(EEPROMSIZE - 13) > 3 || EEPROM.read(EEPROMSIZE - 14) > 240 ||
         EEPROM.read(EEPROMSIZE - 15) > 100 || EEPROM.read(EEPROMSIZE - 1) > 1 ||
@@ -191,19 +177,41 @@ void setup() {
     // pwd = EEPROM.readString(20);          // read what is on EEPROM here for headless environment
     // ssid = EEPROM.readString(EEPROMSIZE); // read what is on EEPROM here for headless environment
     EEPROM.end();
+}
 
-// Init Display
+/*********************************************************************
+**  Function: setup
+**  Where the devices are started and variables set
+*********************************************************************/
+void setup()
+{
+    Serial.begin(115200);
+    delay(2000); // Stabilize USB CDC
+    Serial.println("Starting T-Deck Plus display test...");
+
+#if defined(BACKLIGHT)
+    pinMode(BACKLIGHT, OUTPUT);
+#endif
+
+    _setup_gpio();
+
+    prepareEEPROM(); // Prepare EEPROM
+
+    // Init Display
     tft->begin();
 
-        tft->setRotation(rotation);
-    if (rotation & 0b1) {
+    tft->setRotation(rotation);
+    if (rotation & 0b1)
+    {
 #if defined(HAS_TOUCH)
         tftHeight = TFT_WIDTH - 20;
 #else
         tftHeight = TFT_WIDTH;
 #endif
         tftWidth = TFT_HEIGHT;
-    } else {
+    }
+    else
+    {
 #if defined(HAS_TOUCH)
         tftHeight = TFT_HEIGHT - 20;
 #else
@@ -217,7 +225,7 @@ void setup() {
 
     _post_setup_gpio();
 
-        // This task keeps running all the time, will never stop
+    // This task keeps running all the time, will never stop
     xTaskCreate(
         taskInputHandler, // Task function
         "InputHandler",   // Task Name
@@ -226,7 +234,11 @@ void setup() {
         2,                // Task priority (0 to 3), loopTask has priority 2.
         &xHandle          // Task handle (not used)
     );
-  }
+
+    delay(2500);
+    resetTftDisplay();
+    testDisplay();
+}
 
 void loop() {
   Serial.println("Loop running...");

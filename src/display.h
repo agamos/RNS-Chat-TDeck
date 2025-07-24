@@ -23,6 +23,7 @@ extern Ard_eSPI *tft;
 void loopOptions(const std::vector<std::pair<String, std::function<void()>>> &options, bool bright = false);
 void loopVersions();
 void loopFirmware();
+void testDisplay();
 void initDisplay(bool doAll = false); // Início da função e mostra bootscreen
 void initDisplayLoop();
 

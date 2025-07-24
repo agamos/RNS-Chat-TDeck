@@ -142,8 +142,21 @@ void TouchFooter2(uint16_t color) {
     tft->setTextColor(color);
     tft->setTextSize(FM);
     tft->drawCentreString("Skip", tftWidth / 6, tftHeight + 4, 1);
-    tft->drawCentreString("LAUNCHER", tftWidth / 2, tftHeight + 4, 1);
+    tft->drawCentreString("Tap Here", tftWidth / 2, tftHeight + 4, 1);
     tft->drawCentreString("Skip", 5 * tftWidth / 6, tftHeight + 4, 1);
+}
+
+void testDisplay() {
+    tft->fillScreen(BGCOLOR);
+    tft->setTextColor(FGCOLOR, BGCOLOR);
+    tft->setTextSize(FP);
+    tft->setCursor(10, 10);
+    tft->println("T-Deck Display Test");
+    tft->println("Running in loop...");
+    tft->drawRoundRect(5, 5, tftWidth - 10, tftHeight - 10, 5, FGCOLOR);
+#ifdef E_PAPER_DISPLAY // epaper display draws only once
+    tft->display();
+#endif
 }
 
 /***************************************************************************************
@@ -153,7 +166,7 @@ void TouchFooter2(uint16_t color) {
 void initDisplay(bool doAll) {
 #ifndef HEADLESS
     static uint8_t _name = random(0, 3);
-    String name = "@Pirata";
+    String name = "M0VVA";
     String txt;
     int cor, _x, _y, show;
 
@@ -164,8 +177,7 @@ void initDisplay(bool doAll) {
     tft->stopCallback();
 #endif
 
-    if (_name == 1) name = "u/bmorcelli";
-    else if (_name == 2) name = "gh/bmorcelli";
+    name = "Andy's T-Deck";
     tft->drawRoundRect(3, 3, tftWidth - 6, tftHeight - 6, 5, FGCOLOR);
     tft->setTextSize(FP);
     tft->setCursor(10, 10);
@@ -220,9 +232,9 @@ void initDisplay(bool doAll) {
     tft->setTextSize(FG);
     tft->setTextColor(FGCOLOR);
 #if TFT_HEIGHT > 200
-    tft->drawCentreString("Launcher", tftWidth / 2, tftHeight / 2 - 10, 1);
+    tft->drawCentreString("Reticulum", tftWidth / 2, tftHeight / 2 - 10, 1);
 #else
-    tft->drawCentreString("Launcher", tftWidth / 2, tftHeight / 2 - 10, 1);
+    tft->drawCentreString("Reticulum", tftWidth / 2, tftHeight / 2 - 10, 1);
 #endif
     tft->setTextSize(FG);
     tft->setTextColor(FGCOLOR);
