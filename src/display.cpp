@@ -150,11 +150,10 @@ void testDisplay() {
     tft->fillScreen(BGCOLOR);
     tft->setTextColor(FGCOLOR, BGCOLOR);
     tft->setTextSize(FP);
-    tft->setCursor(10, 10);
+    // tft->setCursor(0, 10);
     tft->println("T-Deck Running");
-    tft->setCursor(10, 15);
     tft->println("See debug output...");
-    tft->drawRoundRect(5, 5, tftWidth - 10, tftHeight - 10, 5, FGCOLOR);
+    // tft->drawRoundRect(5, 5, tftWidth - 10, tftHeight - 10, 5, FGCOLOR);
 #ifdef E_PAPER_DISPLAY // epaper display draws only once
     tft->display();
 #endif

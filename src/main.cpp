@@ -47,6 +47,7 @@ uint16_t ALCOLOR = RED;
 uint16_t BGCOLOR = BLACK;
 uint16_t odd_color = 0x30c5;
 uint16_t even_color = 0x32e5;
+uint8_t margin = 10;
 // Navigation Variables
 long LongPressTmp = 0;
 volatile bool LongPress = false;
@@ -474,7 +475,7 @@ void provision_eeprom() {
     
     EEPROM.commit();
     Serial.println("EEPROM provisioned");
-    tft->println("EEPROM provisioned");
+    tftprintln("EEPROM provisioned", margin);
 }
 
 #define EEPROM_HASH_OFFSET 22
@@ -498,7 +499,7 @@ void set_firmware_hash() {
 
     if (hash_missing) {
         Serial.println("Firmware hash missing, writing default hash...");
-        tft->println("Writing hash...");
+        tftprintln("Writing hash...",10);
         EEPROM.begin(EEPROM_SIZE);
         for (int i = 0; i < FIRMWARE_HASH_LENGTH; i++) {
             EEPROM.write(EEPROM_HASH_OFFSET + i, default_hash[i]);
@@ -510,10 +511,10 @@ void set_firmware_hash() {
         EEPROM.write(21, checksum); // Update checksum
         EEPROM.commit();
         Serial.println("Firmware hash set");
-        tft->println("Hash set");
+        tftprintln("Hash set",10);
     } else {
         Serial.println("Firmware hash already set");
-        tft->println("Hash OK");
+        tftprintln("Hash OK",10);
     }
 }
 
@@ -582,6 +583,25 @@ void prepareEEPROM() {
     EEPROM.end();
 }
 
+bool verify_eeprom() {
+    EEPROM.begin(EEPROM_SIZE);
+    uint8_t product = EEPROM.read(0);
+    uint8_t model = EEPROM.read(1);
+    uint8_t checksum = 0;
+    for (int i = 0; i < 21; i++) {
+        checksum += EEPROM.read(i);
+    }
+    uint8_t stored_checksum = EEPROM.read(21);
+    uint8_t hash_check = EEPROM.read(EEPROM_HASH_OFFSET);
+    EEPROM.end();
+    bool valid = (product == EEPROM_PRODUCT && model == EEPROM_MODEL && checksum == stored_checksum && hash_check != 0xFF);
+    Serial.printf("EEPROM verify: Product=0x%X, Model=0x%X, Checksum=%d, Stored=%d, Hash[0]=0x%X, Valid=%d\n",
+                  product, model, checksum, stored_checksum, hash_check, valid);                  
+    tftprint("EEPROM: ", margin);
+    tftprintln((String)(valid ? "Valid" : "Invalid"), margin);
+    return valid;
+}
+
 /*********************************************************************
 **  Function: setup
 **  Where the devices are started and variables set
@@ -645,26 +665,47 @@ void setup()
     testDisplay();
 
     int prepCount= 1;
+    verify_eeprom();
+    prepareRadio();
+    validate_status();
     while(!hw_ready && prepCount < 2) {
         Serial.println("Radio not ready, retrying...");
-        tft->println("Radio not ready, retrying...");
+        tftprintln("Radio not ready, retrying...", margin);
         delay(1000);
-        prepareRadio();
-        validate_status();
         prepCount++;
         Serial.println("Radio unprovisioned, provisioning EEPROM...");
-        tft->println("Provisioning...");
+        tftprintln("Provisioning...", margin);
         provision_eeprom();
+        Serial.println("Setting firmware hash...");
+        tftprintln("Firmware hash...", margin);
+        set_firmware_hash();
+        if(verify_eeprom()) {
+            Serial.println("EEPROM verified, radio ready.");
+            tft->println("EEPROM OK, radio ready.");
+        } else {
+            Serial.println("EEPROM verification failed, retrying...");
+            tftprintln("EEPROM failed, retrying...", margin);
+        }
+        prepareRadio();
+        validate_status();
     }
-    set_firmware_hash();
-    Serial.println("Radio initialised");
-    tft->println("Radio initialised");
+    if (hw_ready) {
+        Serial.println("Radio initialised");
+        tftprintln("Radio initialised", margin);
+    }
 
 }
 
+int first_time = 1;
 void loop() {
 #if HAS_CONSOLE
-  Serial.println("Loop running...");
+    if (first_time) {
+        Serial.println("");
+        Serial.print("Loop running");
+        first_time = 0;
+    } else {
+        Serial.print(".");
+    }
   delay(1000);
 #endif
 }
