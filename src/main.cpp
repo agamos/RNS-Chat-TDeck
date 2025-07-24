@@ -454,32 +454,39 @@ void validate_status() {
   }
 }
 
+#define EEPROM_HASH_OFFSET 22
+#define FIRMWARE_HASH_LENGTH 32
+
 void provision_eeprom() {
     EEPROM.begin(EEPROM_SIZE);
     
     EEPROM.write(0, EEPROM_PRODUCT);
     EEPROM.write(1, EEPROM_MODEL);
     EEPROM.write(2, EEPROM_HWREV);
-    EEPROM.writeLong(3, EEPROM_SERIAL);
-    EEPROM.writeLong(7, EEPROM_FREQ_MIN);
-    EEPROM.writeLong(11, EEPROM_FREQ_MAX);
+    EEPROM.put(3, EEPROM_SERIAL);
+    EEPROM.put(7, EEPROM_FREQ_MIN);
+    EEPROM.put(11, EEPROM_FREQ_MAX);
     EEPROM.write(15, EEPROM_MAX_TX);
     EEPROM.write(16, EEPROM_MODE);
-    EEPROM.writeLong(17, EEPROM_SIGNATURE);
+    EEPROM.put(17, EEPROM_SIGNATURE);
     
     uint8_t checksum = 0;
     for (int i = 0; i < 21; i++) {
-        checksum += EEPROM.read(i);
+        uint8_t byte = EEPROM.read(i);
+        checksum = (checksum + byte) & 0xFF; // Match RNode_Firmware_CE
+        Serial.printf("EEPROM write: Offset=%d, Value=0x%X, Checksum=%d\n", i, byte, checksum);
     }
     EEPROM.write(21, checksum);
     
-    EEPROM.commit();
-    Serial.println("EEPROM provisioned");
+    bool commit_ok = EEPROM.commit();
+    EEPROM.end();
+    
+    Serial.printf("EEPROM provisioned: Product=0x%X, Model=0x%X, Checksum=0x%X, Commit=%s\n", 
+                  EEPROM.read(0), EEPROM.read(1), checksum, commit_ok ? "OK" : "Failed");
     tftprintln("EEPROM provisioned", margin);
 }
 
-#define EEPROM_HASH_OFFSET 22
-#define FIRMWARE_HASH_LENGTH 32
+
 
 void set_firmware_hash() {
     uint8_t default_hash[FIRMWARE_HASH_LENGTH] = {
@@ -487,11 +494,12 @@ void set_firmware_hash() {
         0x09, 0x0A, 0x0B, 0x0C, 0x0D, 0x0E, 0x0F, 0x10,
         0x11, 0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18,
         0x19, 0x1A, 0x1B, 0x1C, 0x1D, 0x1E, 0x1F, 0x20
-    }; // Dummy hash for testing
+    };
 
+    EEPROM.begin(EEPROM_SIZE);
     bool hash_missing = false;
     for (int i = 0; i < FIRMWARE_HASH_LENGTH; i++) {
-        if (EEPROM.read(EEPROM_HASH_OFFSET + i) == 0xFF) { // Uninitialized EEPROM
+        if (EEPROM.read(EEPROM_HASH_OFFSET + i) == 0xFF) {
             hash_missing = true;
             break;
         }
@@ -499,22 +507,26 @@ void set_firmware_hash() {
 
     if (hash_missing) {
         Serial.println("Firmware hash missing, writing default hash...");
-        tftprintln("Writing hash...",10);
-        EEPROM.begin(EEPROM_SIZE);
+        tftprintln("Writing hash...", margin);
         for (int i = 0; i < FIRMWARE_HASH_LENGTH; i++) {
             EEPROM.write(EEPROM_HASH_OFFSET + i, default_hash[i]);
+            Serial.printf("EEPROM hash write: Offset=%d, Value=0x%X\n", 
+                         EEPROM_HASH_OFFSET + i, default_hash[i]);
         }
         uint8_t checksum = 0;
-        for (int i = 0; i < EEPROM_HASH_OFFSET; i++) {
-            checksum += EEPROM.read(i);
+        for (int i = 0; i < 21; i++) {
+            uint8_t byte = EEPROM.read(i);
+            checksum = (checksum + byte) & 0xFF;
         }
-        EEPROM.write(21, checksum); // Update checksum
-        EEPROM.commit();
-        Serial.println("Firmware hash set");
-        tftprintln("Hash set",10);
+        EEPROM.write(21, checksum);
+        bool commit_ok = EEPROM.commit();
+        EEPROM.end();
+        Serial.printf("Firmware hash set: Hash[0]=0x%X, Checksum=0x%X, Commit=%s\n", 
+                      EEPROM.read(EEPROM_HASH_OFFSET), checksum, commit_ok ? "OK" : "Failed");
+        tftprintln("Hash set", margin);
     } else {
         Serial.println("Firmware hash already set");
-        tftprintln("Hash OK",10);
+        tftprintln("Hash OK", margin);
     }
 }
 
@@ -587,17 +599,33 @@ bool verify_eeprom() {
     EEPROM.begin(EEPROM_SIZE);
     uint8_t product = EEPROM.read(0);
     uint8_t model = EEPROM.read(1);
+    uint32_t serial = 0; EEPROM.get(3, serial);
+    uint32_t freq_min = 0; EEPROM.get(7, freq_min);
+    uint32_t freq_max = 0; EEPROM.get(11, freq_max);
+    uint8_t max_tx = EEPROM.read(15);
+    uint8_t mode = EEPROM.read(16);
+    uint32_t signature = 0; EEPROM.get(17, signature);
     uint8_t checksum = 0;
     for (int i = 0; i < 21; i++) {
-        checksum += EEPROM.read(i);
+        uint8_t byte = EEPROM.read(i);
+        checksum = (checksum + byte) & 0xFF;
+        Serial.printf("EEPROM read: Offset=%d, Value=0x%X, Checksum=%d\n", i, byte, checksum);
     }
     uint8_t stored_checksum = EEPROM.read(21);
     uint8_t hash_check = EEPROM.read(EEPROM_HASH_OFFSET);
     EEPROM.end();
-    bool valid = (product == EEPROM_PRODUCT && model == EEPROM_MODEL && checksum == stored_checksum && hash_check != 0xFF);
-    Serial.printf("EEPROM verify: Product=0x%X, Model=0x%X, Checksum=%d, Stored=%d, Hash[0]=0x%X, Valid=%d\n",
-                  product, model, checksum, stored_checksum, hash_check, valid);                  
-    tftprint("EEPROM: ", margin);
+    
+    bool valid = (product == EEPROM_PRODUCT && model == EEPROM_MODEL &&
+                  serial == EEPROM_SERIAL && freq_min == EEPROM_FREQ_MIN &&
+                  freq_max == EEPROM_FREQ_MAX && max_tx == EEPROM_MAX_TX &&
+                  mode == EEPROM_MODE && signature == EEPROM_SIGNATURE &&
+                  checksum == stored_checksum && hash_check != 0xFF);
+    
+    Serial.printf("EEPROM verify: Product=0x%X, Model=0x%X, Serial=0x%X, Freq=%lu-%lu, "
+                  "TX=%d, Mode=0x%X, Sig=0x%X, Checksum=0x%X, Stored=0x%X, Hash[0]=0x%X, Valid=%d\n",
+                  product, model, serial, freq_min, freq_max, max_tx, mode, signature,
+                  checksum, stored_checksum, hash_check, valid);
+    tftprint("EEPROM:", margin);
     tftprintln((String)(valid ? "Valid" : "Invalid"), margin);
     return valid;
 }
